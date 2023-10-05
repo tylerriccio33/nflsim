@@ -1,5 +1,6 @@
 project:
   type: website
+  output-dir: docs
 
 website:
   title: "nflsim"
@@ -15,5 +16,5 @@ format:
     css: styles.css
     toc: true
 
-editor: visual
+
 

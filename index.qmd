@@ -1,11 +1,309 @@
 ---
 title: "nflsim"
+execute:
+  echo: false
 ---
 
-This is a Quarto website.
+## NFL Game Simulation Results
 
-To learn more about Quarto websites visit <https://quarto.org/docs/websites>.
+### How this works
+
+As opposed to traditional game outcome models, this is a method of resampling of similar situations, per play. By leveraging this scheme, the model pulls from strong historical precedent to form more information rich predictions.
+
+### Advantages
+
+1.  Capture of Subtle Effects
+    1.  Traditional spread models suffer from a slew of issues that is inherent in NFL games. Namely outcome variance and lack of samples.
+    2.  NFL outcomes (scores) are highly variant and subject to change. This makes modeling highly subtle interaction effects nearly impossible as most models are just struggling to estimate the main effects. This is exhibited through 2 main mechanisms.
+        1.  When regularizing tree based models, the subtle effects will be avoided in the model formula due to the inability to estimate their impact on an already complicated and variant outcome.
+        2.  Linear models will have trouble modeling these subtle effects since they usually rely on deep non-linear interactions. Regularizing models like elastic net regression in practice, will completely remove any consideration of subtle effects.
+2.  Realism
+    1.  This resampling method introduces complete realism, since the plays literally happened. By relying on historical precedent, you can expect a degree of realism that a traditional machine learning model can't mimic.
+    2.  This realism will beat a multi-modal or multi-output model like a neural network, since the output being modeled isn't predicted, it's re-sampled from the set.
+3.  Leverage of Additional Information
+    1.  As mentioned, traditional models are often overwhelmed by the magnitude of NFL features. However, they often fail to take advantage of this due to the outcome variance and lack of samples. This makes teasing out very deep interactions, only accessible from fringe features, difficult. By taking into account far more information w/o any performance penalty, this method can model these deep interaction effects.
+
+### Notable Disadvantages
+
+1.  Recency Bias
+    1.  The resampling technique prioritizes recent events rather than skill, unlike other models. This has far more advantages than disadvantages. However, it will fail to capture larger team changes outside of the QB.
+    2.  For example, if there was a running back hurt all last year and they make their debut week 1, the model won't factor this into the resampling. There is *some* information indicating new talent but nothing great enough (yet) to influence the decision making in a major way.
+    3.  In the future, this problem will be slowly be alleviated.
+2.  Significant Roster Changes
+    1.  Like the last point, only *some* new information is available about significant roster changes. The model/resampling leverages existing recent information about how each team performed in some context. This context assumes at least some change in roster/personnel but it has no great way of tracking how great the change is.
+    2.  In the future this problem will be fixed.
+3.  Small Simulation Issues
+    1.  There's no real half-time.
+    2.  Home teams are not afforded the usual 1.5 point advantage on the spread.
+    3.  Home teams always get first ball.
+    4.  Kicker and punter samples tend to be *very* over sampled for recent events. This makes a hot hand at each position probably more influential than it needs to be.
+    5.  Each team doesn't completely know about the clock, although it knows when it should pass and when it is losing.
+    6.  All kickoffs are touch backs.
 
 ```{r}
-1 + 1
+# | echo: false
+
+library(tidyverse)
+library(rlang)
+library(glue)
+library(gt)
+library(gtExtras)
+library(ggthemes)
+library(RColorBrewer)
+library(ggrepel)
+library(dataveRse)
+
+results <- read_rds("unpacked.rds") %>%
+  select(replication_results = value) %>%
+  filter(!map_lgl(replication_results, is.null))
+
+
+all_players <- nflreadr::load_players()
+
+player_name_lookup <- all_players %>%
+  select(id_gsis = gsis_id, name = short_name) %>%
+  drop_na(id_gsis, name) 
+  
+player_headshot_lookup <- all_players %>%
+  select(id_gsis = gsis_id, head = headshot)
+
+teams <- nflreadr::load_teams()
+
+logo_lookup <- select(teams, id_posteam = team_abbr,
+         logo = team_wordmark)
+
+colors <- brewer.pal(9, 'RdYlGn')
+
+
+# extraction functions
+
+extract_scores <- function(result) {
+  
+  result %>%
+    select(id_posteam, posteam_score) %>%
+    group_by(id_posteam) %>%
+    slice_tail(n = 1) %>%
+    ungroup()
+  
+}
+
+extract_score_differential <- function(result) {
+  
+  slice_tail(result, n = 1) %>% 
+    pull(score_differential) %>%
+    .[[1]]
+  
+}
+
+
+extract_variable <-
+  function(data,
+           ...,
+           result_col = replication_results,
+           slice_function = first) {
+    
+    # unpack values
+    # no tidyselect, just enquos
+    
+    cols <- enquos(...) %>% map_chr(quo_name)
+    
+    conversion_func <- function(vals) {
+      
+      type <- typeof(vals)
+      
+      if(type == 'character') {
+        return(map_chr)
+      }
+      if(type == 'double') {
+        return(map_dbl)
+      }
+      if(type == 'integer') {
+        return(map_int)
+      }
+      
+      rlang::abort("Conversion function logic breakdown")
+      
+    }
+    
+  for (col in cols) {
+    
+    example_results <- pull(data, {{result_col}}) %>% .[[1]]
+    values <- pull(example_results, {{col}})
+    fn <- conversion_func(values)
+    
+    data <- data %>%
+      mutate({{col}} := fn({{result_col}}, \(x) slice_function(pull(x, {{col}}) )))
+    
+  }
+
+  return(data)
+  
+}
+
+
+calculate_qb_stats <- function(result) {
+  drop_na(result, id_passer) %>%
+    group_by(id_passer) %>%
+    summarize(
+      completions = sum(complete_pass == 1),
+      incompletions = sum(incomplete_pass == 1),
+      dropbacks = n(),
+      passes = completions + incompletions,
+      total_yards = sum(yards_gained),
+      passing_yards = sum(passing_yards, na.rm = T),
+      rushing_yards = sum(rushing_yards, na.rm = T),
+      cp = completions / passes,
+      cpoe = mean(cpoe, na.rm = T),
+      epa = mean(qb_epa[qb_dropback==1]),
+      tds = sum(touchdown == 1 & complete_pass == 1),
+      sacks = sum(sack == 1),
+      interceptions = sum(interception == 1),
+      scrambles = sum(qb_scramble == 1),
+      receiver_diversity = n_distinct(id_receiver_player),
+      max_air_yards = max(air_yards, na.rm = T),
+      receiver_help = sum(yards_after_catch, na.rm = T) / total_yards,
+      adot = mean(air_yards[(incomplete_pass == 1 | complete_pass == 1) & qb_dropback == 1])
+    )
+  
+}
+
+
+summarize_game <- function(game) {
+  group_by(game, id_posteam) %>%
+    summarize(
+      tds = sum(touchdown),
+      interceptions = sum(interception == 1),
+      qb_hits = sum(qb_hit[qb_dropback == 1]),
+      pass_wpa = sum(wpa[complete_pass == 1]),
+      rush_wpa = sum(wpa[qb_dropback == 0]),
+      early_down_passing = mean(pass_oe[down %in% c(1:2)]),
+      air_yards = mean(air_yards[pass_attempt==1]),
+      yac_wpa = mean(yac_wpa[complete_pass==1]),
+      top = sum(total_play_time)
+    )
+}
+
+game_results_data <- results %>%
+  extract_variable(id_home_team, id_away_team, id_game) %>%
+    extract_variable(id_home_team, id_away_team, id_game) %>%
+  mutate(home_score = map2_dbl(replication_results, id_home_team, ~ {
+    last_diff <- summarize(.x, diff = last(score_differential))
+    last_diff <- last_diff$diff
+    last_team <- summarize(.x, team = last(id_posteam))
+    last_team <- last_team$team
+    corrected <- if_else(last_team == .y, last_diff, last_diff * -1)
+    return(corrected)
+  })) %>%
+  mutate(game = glue("{id_away_team} - {id_home_team}"))
+
+
+```
+
+## Team Level Recaps
+
+```{r}
+
+summary_stats <- game_results_data %>%
+  group_by(id_home_team, id_away_team) %>%
+  summarize(dense_score = {
+      density_estimate <- density(home_score)
+      mode_index <- which.max(density_estimate$y)
+      density_estimate$x[mode_index]
+    },
+    raw_sd = sd(home_score),
+    home_score = mean(home_score),
+    score_dist = list(home_score), 
+    .groups = 'drop') %>%
+  mutate(confidence = 1 - scales::rescale(raw_sd),
+         home_spread = home_score * -1) %>%
+  clean_colnames()
+
+summary_stats %>%
+  # link logo
+  left_join(logo_lookup, by = c('Id Home Team' = 'id_posteam')) %>%
+  select(-`Id Home Team`) %>%
+  rename('Home' = logo) %>%
+    left_join(logo_lookup, by = c('Id Away Team' = 'id_posteam')) %>%
+  select(-`Id Away Team`) %>%
+  rename('Away' = logo) %>%
+  relocate(Home, Away, `Home Score`, `Home Spread`, `Confidence`) %>%
+  # table
+  gt() %>%
+  tab_header("Summary of Game Outcomes", subtitle = "Aggregation of high level stats across simulations per game.") %>%
+  tab_spanner(label = "Teams", columns = c(Home, Away)) %>%
+  tab_spanner(label = "Summary Stats", columns = c(`Home Score`:`Confidence`)) %>%
+  tab_spanner(label = "Advanced Stats", columns = c(`Dense Score`:last_col())) %>%
+  gt_add_divider(columns = `Away`, include_labels = F, color = "black") %>%
+  gt_add_divider(columns = `Confidence`, include_labels = F, color = "black") %>%
+  # fmt
+  fmt_number(columns = c(`Home Score`, `Home Spread`, `Raw Sd`, `Dense Score`), decimals = 2) %>%
+  fmt_percent(Confidence) %>%
+  gt_hulk_col_numeric(`Home Score`) %>%
+  gt_hulk_col_numeric(`Confidence`)  %>%
+  gt_plt_dist(`Score Dist`) %>%
+  # team watermarks
+  gt_img_rows(c(Home)) %>%
+  gt_img_rows(Away) %>%
+  cols_align(align = 'center', columns = c(Home, Away)) %>%
+  # highlighting winner
+   tab_style(
+    locations = cells_body(
+      columns = `Home`,
+      rows = `Home Score` > 0
+    ),
+    style = list(cell_fill(color = '#caf4a1'))
+  ) %>%
+     tab_style(
+    locations = cells_body(
+      columns = `Away`,
+      rows = `Home Score` < 0
+    ),
+    style = list(cell_fill(color = '#caf4a1'))
+  ) %>%
+  # theme
+  dataveRse::gt_my_theme(theme_fn = gt_theme_538)
+
+```
+
+```{r}
+
+pass_results <- results %>%
+  extract_variable(id_game) %>%
+  mutate(qb_results = map(replication_results, calculate_qb_stats)) %>%
+  select(id_game, qb_results) %>%
+  unnest(qb_results) %>%
+  group_by(id_game, id_passer) %>%
+  summarize(across(where(is.numeric), ~ mean(.x))) %>%
+  ungroup() %>%
+  # join to player
+  left_join(player_name_lookup, by = c('id_passer'='id_gsis')) %>%
+  # join to headshot
+  left_join(player_headshot_lookup, by = c('id_passer' = 'id_gsis')) %>%
+  select(-c(id_game, id_passer)) %>%
+  # clean and arrange
+  select(name, head, dropbacks, passing_yards, tds, sacks, interceptions, cpoe, epa) %>%
+  arrange(-epa)
+
+pass_results %>%
+  # table
+  gt() %>%
+  # label
+  gt_add_divider(head, include_labels = F, color = 'black') %>%
+    gt_add_divider(interceptions, include_labels = F, color = 'black') %>%
+  tab_header(title = "Average QB Performance Across Simulations", 
+             subtitle = "Mean statistics extracted from all game replications, ranked by cpoe.") %>%
+  tab_spanner(label = "Simple Metrics",
+              c(dropbacks:interceptions)) %>%
+  tab_spanner(label = "Advanced Metrics", columns = c(cpoe, epa)) %>%
+  # format
+  fmt_number(c(dropbacks, passing_yards, tds, sacks, interceptions),decimals = 1) %>%
+  fmt_number(c(cpoe, epa), decimals = 2) %>%
+  gt_img_rows(head) %>%
+  gt::cols_label(head = "",
+                 name = "QB") %>%
+  # theming
+  gt_hulk_col_numeric(c(tds, cpoe)) %>%
+  gt_my_theme(size = 'medium', theme_fn = gt_theme_538)
+
+
 ```

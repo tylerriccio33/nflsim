@@ -34,176 +34,36 @@ As opposed to traditional game outcome models, this is a method of resampling of
     2.  In the future this problem will be fixed.
 3.  Small Simulation Issues
     1.  There's no real half-time.
-    2.  Home teams are not afforded the usual 1.5 point advantage on the spread.
-    3.  Home teams always get first ball.
-    4.  Kicker and punter samples tend to be *very* over sampled for recent events. This makes a hot hand at each position probably more influential than it needs to be.
-    5.  Each team doesn't completely know about the clock, although it knows when it should pass and when it is losing.
-    6.  All kickoffs are touch backs.
+    2.  Home teams are not afforded the usual 1.5 point advantage on the spread but are given an average of one extra possession.
+    3.  Kicker and punter samples tend to be *very* over sampled for recent events. This makes a hot hand at each position probably more influential than it needs to be.
+    4.  Each team doesn't completely know about the clock, although it knows when it should pass and when it is losing.
+    5.  All kickoffs are touch backs.
 
 ```{r}
-# | echo: false
-
-library(tidyverse)
-library(rlang)
-library(glue)
-library(gt)
-library(gtExtras)
-library(ggthemes)
-library(RColorBrewer)
-library(ggrepel)
-library(dataveRse)
-
-results <- read_rds("unpacked.rds") %>%
-  select(replication_results = value) %>%
-  filter(!map_lgl(replication_results, is.null))
-
-
-all_players <- nflreadr::load_players()
-
-player_name_lookup <- all_players %>%
-  select(id_gsis = gsis_id, name = short_name) %>%
-  drop_na(id_gsis, name) 
-  
-player_headshot_lookup <- all_players %>%
-  select(id_gsis = gsis_id, head = headshot)
-
-teams <- nflreadr::load_teams()
-
-logo_lookup <- select(teams, id_posteam = team_abbr,
-         logo = team_wordmark)
-
-colors <- brewer.pal(9, 'RdYlGn')
-
-
-# extraction functions
-
-extract_scores <- function(result) {
-  
-  result %>%
-    select(id_posteam, posteam_score) %>%
-    group_by(id_posteam) %>%
-    slice_tail(n = 1) %>%
-    ungroup()
-  
-}
-
-extract_score_differential <- function(result) {
-  
-  slice_tail(result, n = 1) %>% 
-    pull(score_differential) %>%
-    .[[1]]
-  
-}
-
-
-extract_variable <-
-  function(data,
-           ...,
-           result_col = replication_results,
-           slice_function = first) {
-    
-    # unpack values
-    # no tidyselect, just enquos
-    
-    cols <- enquos(...) %>% map_chr(quo_name)
-    
-    conversion_func <- function(vals) {
-      
-      type <- typeof(vals)
-      
-      if(type == 'character') {
-        return(map_chr)
-      }
-      if(type == 'double') {
-        return(map_dbl)
-      }
-      if(type == 'integer') {
-        return(map_int)
-      }
-      
-      rlang::abort("Conversion function logic breakdown")
-      
-    }
-    
-  for (col in cols) {
-    
-    example_results <- pull(data, {{result_col}}) %>% .[[1]]
-    values <- pull(example_results, {{col}})
-    fn <- conversion_func(values)
-    
-    data <- data %>%
-      mutate({{col}} := fn({{result_col}}, \(x) slice_function(pull(x, {{col}}) )))
-    
-  }
-
-  return(data)
-  
-}
-
-
-calculate_qb_stats <- function(result) {
-  drop_na(result, id_passer) %>%
-    group_by(id_passer) %>%
-    summarize(
-      completions = sum(complete_pass == 1),
-      incompletions = sum(incomplete_pass == 1),
-      dropbacks = n(),
-      passes = completions + incompletions,
-      total_yards = sum(yards_gained),
-      passing_yards = sum(passing_yards, na.rm = T),
-      rushing_yards = sum(rushing_yards, na.rm = T),
-      cp = completions / passes,
-      cpoe = mean(cpoe, na.rm = T),
-      epa = mean(qb_epa[qb_dropback==1]),
-      tds = sum(touchdown == 1 & complete_pass == 1),
-      sacks = sum(sack == 1),
-      interceptions = sum(interception == 1),
-      scrambles = sum(qb_scramble == 1),
-      receiver_diversity = n_distinct(id_receiver_player),
-      max_air_yards = max(air_yards, na.rm = T),
-      receiver_help = sum(yards_after_catch, na.rm = T) / total_yards,
-      adot = mean(air_yards[(incomplete_pass == 1 | complete_pass == 1) & qb_dropback == 1])
-    )
-  
-}
-
-
-summarize_game <- function(game) {
-  group_by(game, id_posteam) %>%
-    summarize(
-      tds = sum(touchdown),
-      interceptions = sum(interception == 1),
-      qb_hits = sum(qb_hit[qb_dropback == 1]),
-      pass_wpa = sum(wpa[complete_pass == 1]),
-      rush_wpa = sum(wpa[qb_dropback == 0]),
-      early_down_passing = mean(pass_oe[down %in% c(1:2)]),
-      air_yards = mean(air_yards[pass_attempt==1]),
-      yac_wpa = mean(yac_wpa[complete_pass==1]),
-      top = sum(total_play_time)
-    )
-}
-
-game_results_data <- results %>%
-  extract_variable(id_home_team, id_away_team, id_game) %>%
-    extract_variable(id_home_team, id_away_team, id_game) %>%
-  mutate(home_score = map2_dbl(replication_results, id_home_team, ~ {
-    last_diff <- summarize(.x, diff = last(score_differential))
-    last_diff <- last_diff$diff
-    last_team <- summarize(.x, team = last(id_posteam))
-    last_team <- last_team$team
-    corrected <- if_else(last_team == .y, last_diff, last_diff * -1)
-    return(corrected)
-  })) %>%
-  mutate(game = glue("{id_away_team} - {id_home_team}"))
-
-
+source("src.R")
+source("data.R")
 ```
 
 ## Team Level Recaps
 
 ```{r}
 
-summary_stats <- game_results_data %>%
+
+summary_stats_gt <- game_results_data %>% 
+  mutate(points_tibble = map(replication_results, ~ {
+    group_by(.x, id_posteam) %>%
+      summarize(tds = sum(touchdown),
+                fgs = sum(field_goal_made), 
+                .groups = 'drop') %>%
+      mutate(tds = tds * 7,
+             fgs = fgs * 3) %>%
+      rowwise() %>%
+      mutate(points = sum(c_across(c(tds, fgs)))) %>%
+      ungroup() %>%
+      select(-c(tds, fgs))
+  })) %>%
+  mutate(home_points = map2_dbl(points_tibble, id_home_team, \(x, y) filter(x, id_posteam == y)$points),
+         away_points = map2_dbl(points_tibble, id_away_team, \(x, y) filter(x, id_posteam == y)$points)) %>%
   group_by(id_home_team, id_away_team) %>%
   summarize(dense_score = {
       density_estimate <- density(home_score)
@@ -212,56 +72,82 @@ summary_stats <- game_results_data %>%
     },
     raw_sd = sd(home_score),
     home_score = mean(home_score),
+    home_points = mean(home_points),
+    away_points = mean(away_points),
     score_dist = list(home_score), 
     .groups = 'drop') %>%
   mutate(confidence = 1 - scales::rescale(raw_sd),
          home_spread = home_score * -1) %>%
-  clean_colnames()
+lookup_replace(logo_lookup, by = c('id_home_team' = 'id_posteam'), logo) %>%
+  lookup_replace(logo_lookup, by = c('id_away_team' = 'id_posteam'), logo) %>%
+  mutate(total = home_points + away_points) %>%
+  relocate(
+    id_home_team,
+      id_away_team,
+      home_score,
+      home_points,
+      away_points,
+      confidence,
+      home_spread,
+      total
+  ) 
 
-summary_stats %>%
-  # link logo
-  left_join(logo_lookup, by = c('Id Home Team' = 'id_posteam')) %>%
-  select(-`Id Home Team`) %>%
-  rename('Home' = logo) %>%
-    left_join(logo_lookup, by = c('Id Away Team' = 'id_posteam')) %>%
-  select(-`Id Away Team`) %>%
-  rename('Away' = logo) %>%
-  relocate(Home, Away, `Home Score`, `Home Spread`, `Confidence`) %>%
-  # table
+
+summary_stats_gt %>%
   gt() %>%
-  tab_header("Summary of Game Outcomes", subtitle = "Aggregation of high level stats across simulations per game.") %>%
-  tab_spanner(label = "Teams", columns = c(Home, Away)) %>%
-  tab_spanner(label = "Summary Stats", columns = c(`Home Score`:`Confidence`)) %>%
-  tab_spanner(label = "Advanced Stats", columns = c(`Dense Score`:last_col())) %>%
-  gt_add_divider(columns = `Away`, include_labels = F, color = "black") %>%
-  gt_add_divider(columns = `Confidence`, include_labels = F, color = "black") %>%
+  # data manipulation
+  cols_label(
+    id_home_team = "home",
+    id_away_team = "away"
+  )  %>%
+  cols_label_with(fn = clean_colnames_vec) %>%
+  # titles
+  tab_header("Results of 150 Simulations per Game") %>%
+  tab_spanner(label = "Teams", columns = c(id_home_team:id_away_team))  %>%
+  tab_spanner(label = "Summary", columns = c(home_score:confidence)) %>%
+  tab_spanner(label = "Odds", columns = c(home_spread,total)) %>%
+  tab_spanner(label = "Advanced Stats", columns = c(dense_score:last_col())) %>%
+  gt_add_divider(columns = id_away_team, include_labels = F, color = "black") %>%
+  gt_add_divider(columns = confidence, include_labels = F, color = "black") %>%
+  gt_add_divider(columns = total, include_labels = F, color = "black") %>%
   # fmt
-  fmt_number(columns = c(`Home Score`, `Home Spread`, `Raw Sd`, `Dense Score`), decimals = 2) %>%
-  fmt_percent(Confidence) %>%
-  gt_hulk_col_numeric(`Home Score`) %>%
-  gt_hulk_col_numeric(`Confidence`)  %>%
-  gt_plt_dist(`Score Dist`) %>%
-  # team watermarks
-  gt_img_rows(c(Home)) %>%
-  gt_img_rows(Away) %>%
-  cols_align(align = 'center', columns = c(Home, Away)) %>%
-  # highlighting winner
+  fmt_number(columns = c(where(is.numeric), -confidence), decimals = 1) %>%
+  fmt_percent(confidence)  %>%
+  gt_img_rows(c(id_home_team)) %>%
+  gt_img_rows(id_away_team) %>%
+  cols_align(align = 'center', columns = c(id_home_team, id_away_team)) %>%
+  # coloring
+  gt_hulk_col_numeric(home_score) %>%
+  gt_hulk_col_numeric(confidence)  %>%
    tab_style(
     locations = cells_body(
-      columns = `Home`,
-      rows = `Home Score` > 0
+      columns = id_home_team,
+      rows = home_score > 0
     ),
     style = list(cell_fill(color = '#caf4a1'))
   ) %>%
      tab_style(
     locations = cells_body(
-      columns = `Away`,
-      rows = `Home Score` < 0
+      columns = id_away_team,
+      rows = home_score < 0
     ),
     style = list(cell_fill(color = '#caf4a1'))
   ) %>%
+  # notes
+  tab_footnote(md("Interpreted as a *home* win by this much."),
+              locations = cells_column_labels(columns = home_score)) %>%
+  tab_footnote(md("Function of relative variance in the results, also the *Raw SD*. Higher numbers indicate higher ranges of outcomes, or uncertainty."),
+               locations = cells_column_labels(columns = confidence)) %>%
+  tab_footnote("Adjusted results reflecting the most dense location in the score distribution. Numbers should closely reflect the average, if distributed normally.",
+               locations = cells_column_labels(columns = dense_score)) %>%
   # theme
-  dataveRse::gt_my_theme(theme_fn = gt_theme_538)
+  dataveRse::gt_my_theme(theme_fn = gt_theme_538) %>%
+  tab_options(footnotes.multiline = F) %>%
+  tab_source_note(html('<pre><span style="background-color: #caf4a1;"
+                       >        </span> = Winner</pre>')) %>%
+
+  # plot
+    gt_plt_dist(score_dist)
 
 ```
 
@@ -306,4 +192,147 @@ pass_results %>%
   gt_my_theme(size = 'medium', theme_fn = gt_theme_538)
 
 
+```
+
+### Deep Dives
+
+```{r}
+
+# set stat classes
+stat_list <- list(
+air_yards = Stat("air_yards",
+                  "Air it out - wins included high average air yards."),
+early_down_passing = Stat("early_down_passing",
+                           "Throw it early - wins were associated with higher early down passing over expected."),
+interceptions = Stat("interceptions",
+                      "Minimize the interceptions - wins included a low int rate",
+                      max = F),
+pass_wpa = Stat("pass_wpa",
+                 "Be an effective passer - wins were lead by highly effective passing games."),
+qb_hits = Stat("qb_hits",
+                "Protect the QB - wins were associated with low qb hit rates.",
+                max = F),
+rush_wpa = Stat("rush_wpa",
+                 "Be run efficient - wins were driven by an consistently effective run game."),
+tds = Stat("tds",
+            "Hit paydirt - games were won by touchdowns, not field goals."),
+top = Stat("top",
+            "Control the game - time of possession was important to winning games."),
+yac_wpa = Stat("yac_wpa",
+                "Lean on YAC - win on the back of consistent yac.")
+)
+
+deep_game_stats <- results %>%
+  extract_variable(id_game, id_home_team, id_away_team) %>%
+  extract_variable(score_differential, slice_function = last) %>%
+  mutate(home_win = score_differential > 0)  %>%
+  mutate(game_summary = map(replication_results, \(x) summarize_game(x))) %>%
+  select(game_summary, id_game, home_win, id_home_team, id_away_team)  %>%
+  unnest(game_summary) %>%
+  mutate(winning_team = if_else(home_win, id_home_team, id_away_team)) %>%
+  group_by(id_game, winning_team, id_posteam) %>%
+  summarize(across(where(is.numeric), \(x) mean(x, na.rm = T))) %>%
+  ungroup() %>%
+  filter(winning_team == id_posteam) %>%
+  select(-winning_team) %>%
+  pivot_longer(cols = -c(id_game, id_posteam), 
+               names_to = "metric") %>%
+  # rank before wider pivot
+  group_by(metric) %>%
+  arrange(-value, .by_group = T) %>%
+  mutate(rank = row_number()) %>%
+  group_by(id_game) %>%
+  mutate(cls = map(metric, \(x) stat_list[[x]]))  %>%
+  unnest_wider(cls) %>%
+  ungroup() %>%
+  group_by(metric) %>%
+  mutate(rank = if_else(max, rank, rev(rank))) %>%
+  ungroup() %>%
+  filter(rank <= 5) %>%
+  mutate(across(ends_with('rank'), ~ as.character(.x)),
+         across(ends_with('rank'), ~ paste0(.x, "/32"))) %>%
+  relocate(starts_with('id_'), starts_with('home_')) %>%
+  lookup_replace(logo_lookup, by = c('id_posteam' = 'id_posteam'), logo) %>%
+  group_by(id_game) %>%
+  select(-c(name, max, max_fn)) %>%
+  arrange(id_game) %>%
+  arrange(id_posteam, .by_group = T) 
+
+
+deep_game_stats %>%
+  # table
+  gt() %>%
+  # formatting
+  fmt_number(c(value), decimals = 1) %>%
+  # rank merge
+  gt_merge_stack(col1 = value, col2 = rank) %>%
+  cols_hide(c(metric)) %>%
+  cols_move_to_start(c(id_posteam)) %>%
+  # image manipulation
+  gt_img_rows(columns = c(id_posteam))  %>%
+  # labeling
+  cols_label(id_posteam = "",
+             value = "Value/Rank",
+             text = "") %>%
+  # titles
+  tab_header("Keys to the Game",
+             subtitle = "Trends and formulas driving wins and losses. Some teams will not be represented, directly.") %>%
+  tab_footnote("") %>%
+  # theming
+  dataveRse::gt_my_theme(theme_fn = gt_theme_538)
+
+
+
+```
+
+### WR Stats
+
+```{r}
+
+calculate_wr_stats <- function(result) {
+  drop_na(result,id_receiver_player) %>%
+    group_by(id_receiver_player) %>%
+    summarize(yards_gained = sum(yards_gained, na.rm = T),
+              passing_yards = sum(passing_yards, na.rm = T),
+              yac = sum(yards_after_catch, na.rm = T),
+              tds = sum(touchdown, na.rm = T)) %>%
+    ungroup()
+}
+
+
+wr_results <- results %>%
+  extract_variable(id_game) %>%
+  mutate(wr_results = map(replication_results, calculate_wr_stats)) %>%
+  select(id_game, wr_results) %>%
+  unnest(wr_results) %>%
+  group_by(id_game, id_receiver_player) %>%
+  summarize(across(where(is.numeric), ~ mean(.x))) %>%
+  ungroup() %>%
+  filter(yards_gained > 25) %>%
+  # join to player
+  left_join(player_name_lookup, by = c('id_receiver_player'='id_gsis')) %>%
+  # join to headshot
+  left_join(player_headshot_lookup, by = c('id_receiver_player' = 'id_gsis')) %>%
+  select(-c(id_game, id_receiver_player))  %>%
+  #arrange
+  arrange(-yards_gained)
+
+wr_results%>%
+  relocate(name, head) %>%
+    gt() %>%
+    # label
+    tab_header("Receiving Statistics", subtitle = "Summary stats across any receiver player for all simulations.") %>%
+    # ftm
+    fmt_number(columns = where(is.numeric), decimals = 1) %>%
+  gt_img_rows(head) %>%
+    # color
+    gt_hulk_col_numeric(c(yards_gained, tds)) %>%
+    # theme
+     gt::cols_label(head = "",
+                 name = "Player") %>%
+      opt_interactive(use_pagination = F, use_search = T) %>%
+    gt_my_theme(size = 'big', theme_fn = gt_theme_espn)
+  
+  
+  
 ```
